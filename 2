@@ -1,0 +1,183 @@
+-- Anime Dice Event Notifier (เวอร์ชันเบา: ไม่มี UI, ไม่มี polling)
+if getgenv().TwoK then pcall(getgenv().TwoK) end
+
+local WEBHOOK = tostring(_G.Authorize or "") -- webhook หลัก (ทุกอีเว้น) ใส่ที่ _G.Authorize ก่อนรัน loader
+local RARE_WEBHOOK = tostring(_G.AuthorizeRare or "") -- webhook แยกเฉพาะอีเว้นหายาก ใส่ที่ _G.AuthorizeRare (ถ้าไม่ใส่ จะไม่ส่งซ้ำ)
+local RARE_BIOMES = { ["Heaven's Gate"] = true, ["Shattered Reality"] = true }
+
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local LocalPlayer = Players.LocalPlayer
+local httpRequest = (syn and syn.request) or http_request or request or (http and http.request) or (fluxus and fluxus.request)
+print("[Notifier] http function:", httpRequest and "พบ" or "ไม่พบ (executor ไม่รองรับ request)")
+
+local EVENT_EMOJI = {
+    ["Sakura Bloom"] = "🌸", ["Thunderstorm"] = "⛈️", ["Blizzard"] = "❄️",
+    ["Blood Moon"] = "🌕", ["Aurora"] = "🌌", ["Eclipse"] = "🌑",
+    ["Dragon's Wrath"] = "🐉", ["Void Rift"] = "🌀", ["Heaven's Gate"] = "😇",
+    ["Shattered Reality"] = "💥",
+}
+
+local DEBUG = false -- เปิดเป็น true ถ้าอยากดู attribute ทั้งหมดใน Discord
+local SAVE_RESOURCE = false -- true = ปิดการเรนเดอร์ 3D + จำกัด FPS ตอนปล่อยเครื่องทิ้งไว้ (หน้าจอจะดำ) ลด CPU/GPU/แรมได้มาก
+local conns = {}
+local lastStarted = -1
+local cfg -- โหลดตอนใช้งานจริงครั้งแรกเท่านั้น
+
+local function getInfo(biomeName)
+    if cfg == nil then
+        local ok, res = pcall(function()
+            return require(game.ReplicatedStorage.Framework.Features.Biomes.BiomeConfig)
+        end)
+        cfg = ok and res or false
+    end
+    if not cfg then return end
+    for _, d in ipairs(cfg.Ordered or {}) do
+        if d.name == biomeName then return d end
+    end
+end
+
+local function sendTo(url, title, desc, color)
+    if not httpRequest then warn("[Notifier] ไม่พบฟังก์ชัน request") return end
+    if not url:find("discord.com/api/webhooks") then return end
+    task.spawn(function()
+    local ok, res = pcall(httpRequest, {
+        Url = url,
+        Method = "POST",
+        Headers = { ["Content-Type"] = "application/json" },
+        Body = HttpService:JSONEncode({
+            username = "Anime Dice Event Notifier",
+            embeds = {{
+                title = title,
+                description = desc,
+                color = color,
+                fields = {{
+                    name = "วิธีเข้าเซิร์ฟ (คัดลอกไปรันใน executor)",
+                    value = "```lua\ngame:GetService(\"TeleportService\"):TeleportToPlaceInstance(" .. game.PlaceId .. ", \"" .. game.JobId .. "\")\n```",
+                }},
+                footer = { text = "Server: " .. game.JobId .. " | " .. os.date("%H:%M:%S") },
+            }},
+        }),
+    })
+    if not ok then
+        warn("[Notifier] ส่ง webhook ไม่ได้:", res)
+    elseif res and res.StatusCode and (res.StatusCode < 200 or res.StatusCode >= 300) then
+        warn("[Notifier] Discord ตอบกลับ", res.StatusCode, res.Body)
+    else
+        print("[Notifier] ส่งสำเร็จ:", title)
+    end
+    end)
+end
+
+local function send(title, desc, color, biome)
+    sendTo(WEBHOOK, title, desc, color)
+    if biome and RARE_BIOMES[biome] then
+        sendTo(RARE_WEBHOOK, title, desc, color)
+    end
+end
+
+local function check()
+    local biome = workspace:GetAttribute("Biome")
+    local started = workspace:GetAttribute("BiomeStartedAt") or 0
+    if not biome or started <= 0 or started == lastStarted then return end
+    lastStarted = started
+
+    local info = getInfo(biome)
+    local attrs = workspace:GetAttributes()
+    local summoner = attrs.BiomeSummoner
+    if summoner == nil or summoner == "" then
+        -- เผื่อเกมใช้ชื่อ attribute อื่น
+        for k, v in pairs(attrs) do
+            local lk = string.lower(k)
+            if (lk:find("summon") or lk:find("owner") or lk:find("caster") or lk:find("trigger") or lk:find("user") or lk:find("player"))
+                and lk:find("biome") and v ~= nil and v ~= "" then
+                summoner = v
+                break
+            end
+        end
+    end
+    local p
+    if summoner then
+        p = Players:FindFirstChild(tostring(summoner))
+        if not p then
+            local id = tonumber(summoner)
+            if id then p = Players:GetPlayerByUserId(id) end
+        end
+        if not p then
+            for _, pl in ipairs(Players:GetPlayers()) do
+                if pl.DisplayName == tostring(summoner) then p = pl break end
+            end
+        end
+    end
+    local who
+    p = p or (not summoner and LocalPlayer) or nil
+    if p then
+        who = p.DisplayName == p.Name and p.Name or (p.DisplayName .. " (@" .. p.Name .. ")")
+    else
+        who = tostring(summoner)
+    end
+    local dur = math.floor(workspace:GetAttribute("BiomeDuration") or 300)
+
+    local lines = {
+        "**ผู้เล่น:** " .. who,
+        "**ระยะเวลา:** " .. dur .. " วินาที",
+    }
+    local color = 0xFF8CC8
+    if DEBUG then
+        local dbg = {}
+        for k, v in pairs(attrs) do dbg[#dbg + 1] = tostring(k) .. " = " .. tostring(v) end
+        table.sort(dbg)
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = "**DEBUG attributes:**\n```\n" .. table.concat(dbg, "\n") .. "\n```"
+    end
+    if info then
+        table.insert(lines, 2, "**Mutation:** " .. (info.mutation or "-") .. " — " .. tostring(info.rollLuck or 0) .. "x Luck")
+        local buffs = {}
+        for k, v in pairs(info.buffs or {}) do buffs[#buffs + 1] = "• " .. k .. " ×" .. tostring(v.amount) end
+        if #buffs > 0 then
+            lines[#lines + 1] = ""
+            lines[#lines + 1] = "**Buffs:**"
+            lines[#lines + 1] = table.concat(buffs, "\n")
+        end
+        local hex = (tostring(info.tagColor or "#FF8CC8"):gsub("#", ""))
+        color = tonumber(hex, 16) or color
+    end
+
+    send((EVENT_EMOJI[biome] or "🎲") .. " " .. biome .. " " .. (info and info.title or "เริ่มแล้ว!"),
+        table.concat(lines, "\n"), color, biome)
+end
+
+-- ทำงานเฉพาะตอนค่า attribute เปลี่ยน (ไม่มีลูป)
+local function safeCheck()
+    local ok, err = pcall(check)
+    if not ok then send("⚠️ Error", "```" .. tostring(err) .. "```", 0xFF0000) end
+end
+local function onChange() task.defer(safeCheck) end
+conns[#conns + 1] = workspace:GetAttributeChangedSignal("BiomeStartedAt"):Connect(onChange)
+conns[#conns + 1] = workspace:GetAttributeChangedSignal("Biome"):Connect(onChange)
+
+-- Anti-AFK (เบามาก ทำงานเฉพาะตอนโดน idle)
+conns[#conns + 1] = LocalPlayer.Idled:Connect(function()
+    local vu = game:GetService("VirtualUser")
+    vu:CaptureController()
+    vu:ClickButton2(Vector2.new())
+end)
+
+getgenv().TwoK = function()
+    for _, c in ipairs(conns) do c:Disconnect() end
+    table.clear(conns)
+end
+
+safeCheck() -- เช็คครั้งเดียวตอนเริ่ม เผื่ออีเว้นกำลังเกิดอยู่
+
+if SAVE_RESOURCE then
+    pcall(function() game:GetService("RunService"):Set3dRenderingEnabled(false) end)
+    pcall(function() if setfpscap then setfpscap(10) end end)
+    pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+    local oldStop = getgenv().TwoK
+    getgenv().TwoK = function()
+        pcall(function() game:GetService("RunService"):Set3dRenderingEnabled(true) end)
+        pcall(function() if setfpscap then setfpscap(0) end end)
+        oldStop()
+    end
+end
