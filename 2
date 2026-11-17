@@ -1,7 +1,9 @@
--- Anime Dice Event Notifier (เวอร์ชันเบา: ไม่มี UI, ไม่มี polling)
-if getgenv().TwoK then pcall(getgenv().TwoK) end
+-- Anime Dice Event Notifier (เบา: ไม่มี UI, ไม่มี polling, ไม่ยุ่งกับเทเลพอร์ต)
+-- ใช้ชื่อ global เฉพาะตัว จะได้ไม่ชนกับสคริปต์หลักที่ใช้ getgenv().TwoK
+local STOP_KEY = "AnimeDiceNotifier_Stop"
+if getgenv()[STOP_KEY] then pcall(getgenv()[STOP_KEY]) end
 
-local WEBHOOK = tostring(_G.Authorize or "") -- webhook หลัก (ทุกอีเว้น) ใส่ที่ _G.Authorize ก่อนรัน loader
+local WEBHOOK = tostring(_G.Authorize or "") -- webhook หลัก (ทุกอีเว้นในลิสต์) ใส่ที่ _G.Authorize ก่อนรัน loader
 local RARE_WEBHOOK = tostring(_G.AuthorizeRare or "") -- webhook แยกเฉพาะอีเว้นหายาก ใส่ที่ _G.AuthorizeRare (ถ้าไม่ใส่ จะไม่ส่งซ้ำ)
 local RARE_BIOMES = { ["Heaven's Gate"] = true, ["Shattered Reality"] = true }
 
@@ -11,18 +13,22 @@ local LocalPlayer = Players.LocalPlayer
 local httpRequest = (syn and syn.request) or http_request or request or (http and http.request) or (fluxus and fluxus.request)
 print("[Notifier] http function:", httpRequest and "พบ" or "ไม่พบ (executor ไม่รองรับ request)")
 
+-- แจ้งเตือนเฉพาะอีเว้นในลิสต์นี้เท่านั้น
 local EVENT_EMOJI = {
     ["Sakura Bloom"] = "🌸", ["Thunderstorm"] = "⛈️", ["Blizzard"] = "❄️",
     ["Blood Moon"] = "🌕", ["Aurora"] = "🌌", ["Eclipse"] = "🌑",
     ["Dragon's Wrath"] = "🐉", ["Void Rift"] = "🌀", ["Heaven's Gate"] = "😇",
     ["Shattered Reality"] = "💥",
 }
+local ALLOWED = {}
+for name, emoji in pairs(EVENT_EMOJI) do ALLOWED[string.lower(name)] = { name = name, emoji = emoji } end
 
 local DEBUG = false -- เปิดเป็น true ถ้าอยากดู attribute ทั้งหมดใน Discord
-local SAVE_RESOURCE = false -- true = ปิดการเรนเดอร์ 3D + จำกัด FPS ตอนปล่อยเครื่องทิ้งไว้ (หน้าจอจะดำ) ลด CPU/GPU/แรมได้มาก
+local ANTI_AFK = false -- ปิดเป็น false ถ้าสคริปต์หลักมี anti-afk อยู่แล้ว
+local SAVE_RESOURCE = false -- true = ปิดการเรนเดอร์ 3D + จำกัด FPS (หน้าจอจะดำ)
 local conns = {}
 local lastStarted = -1
-local cfg -- โหลดตอนใช้งานจริงครั้งแรกเท่านั้น
+local cfg
 
 local function getInfo(biomeName)
     if cfg == nil then
@@ -41,31 +47,27 @@ local function sendTo(url, title, desc, color)
     if not httpRequest then warn("[Notifier] ไม่พบฟังก์ชัน request") return end
     if not url:find("discord.com/api/webhooks") then return end
     task.spawn(function()
-    local ok, res = pcall(httpRequest, {
-        Url = url,
-        Method = "POST",
-        Headers = { ["Content-Type"] = "application/json" },
-        Body = HttpService:JSONEncode({
-            username = "Anime Dice Event Notifier",
-            embeds = {{
-                title = title,
-                description = desc,
-                color = color,
-                fields = {{
-                    name = "วิธีเข้าเซิร์ฟ (คัดลอกไปรันใน executor)",
-                    value = "```lua\ngame:GetService(\"TeleportService\"):TeleportToPlaceInstance(" .. game.PlaceId .. ", \"" .. game.JobId .. "\")\n```",
+        local ok, res = pcall(httpRequest, {
+            Url = url,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = HttpService:JSONEncode({
+                username = "Anime Dice Event Notifier",
+                embeds = {{
+                    title = title,
+                    description = desc,
+                    color = color,
+                    footer = { text = "Server: " .. game.JobId .. " | " .. os.date("%H:%M:%S") },
                 }},
-                footer = { text = "Server: " .. game.JobId .. " | " .. os.date("%H:%M:%S") },
-            }},
-        }),
-    })
-    if not ok then
-        warn("[Notifier] ส่ง webhook ไม่ได้:", res)
-    elseif res and res.StatusCode and (res.StatusCode < 200 or res.StatusCode >= 300) then
-        warn("[Notifier] Discord ตอบกลับ", res.StatusCode, res.Body)
-    else
-        print("[Notifier] ส่งสำเร็จ:", title)
-    end
+            }),
+        })
+        if not ok then
+            warn("[Notifier] ส่ง webhook ไม่ได้:", res)
+        elseif res and res.StatusCode and (res.StatusCode < 200 or res.StatusCode >= 300) then
+            warn("[Notifier] Discord ตอบกลับ", res.StatusCode, res.Body)
+        else
+            print("[Notifier] ส่งสำเร็จ:", title)
+        end
     end)
 end
 
@@ -82,11 +84,15 @@ local function check()
     if not biome or started <= 0 or started == lastStarted then return end
     lastStarted = started
 
+    -- กรอง: ไม่อยู่ในลิสต์ = ไม่แจ้ง
+    local allowed = ALLOWED[string.lower(tostring(biome))]
+    if not allowed then return end
+    biome = allowed.name
+
     local info = getInfo(biome)
     local attrs = workspace:GetAttributes()
     local summoner = attrs.BiomeSummoner
     if summoner == nil or summoner == "" then
-        -- เผื่อเกมใช้ชื่อ attribute อื่น
         for k, v in pairs(attrs) do
             local lk = string.lower(k)
             if (lk:find("summon") or lk:find("owner") or lk:find("caster") or lk:find("trigger") or lk:find("user") or lk:find("player"))
@@ -143,11 +149,10 @@ local function check()
         color = tonumber(hex, 16) or color
     end
 
-    send((EVENT_EMOJI[biome] or "🎲") .. " " .. biome .. " " .. (info and info.title or "เริ่มแล้ว!"),
+    send(allowed.emoji .. " " .. biome .. " " .. (info and info.title or "เริ่มแล้ว!"),
         table.concat(lines, "\n"), color, biome)
 end
 
--- ทำงานเฉพาะตอนค่า attribute เปลี่ยน (ไม่มีลูป)
 local function safeCheck()
     local ok, err = pcall(check)
     if not ok then send("⚠️ Error", "```" .. tostring(err) .. "```", 0xFF0000) end
@@ -156,14 +161,15 @@ local function onChange() task.defer(safeCheck) end
 conns[#conns + 1] = workspace:GetAttributeChangedSignal("BiomeStartedAt"):Connect(onChange)
 conns[#conns + 1] = workspace:GetAttributeChangedSignal("Biome"):Connect(onChange)
 
--- Anti-AFK (เบามาก ทำงานเฉพาะตอนโดน idle)
-conns[#conns + 1] = LocalPlayer.Idled:Connect(function()
-    local vu = game:GetService("VirtualUser")
-    vu:CaptureController()
-    vu:ClickButton2(Vector2.new())
-end)
+if ANTI_AFK then
+    conns[#conns + 1] = LocalPlayer.Idled:Connect(function()
+        local vu = game:GetService("VirtualUser")
+        vu:CaptureController()
+        vu:ClickButton2(Vector2.new())
+    end)
+end
 
-getgenv().TwoK = function()
+getgenv()[STOP_KEY] = function()
     for _, c in ipairs(conns) do c:Disconnect() end
     table.clear(conns)
 end
@@ -174,8 +180,8 @@ if SAVE_RESOURCE then
     pcall(function() game:GetService("RunService"):Set3dRenderingEnabled(false) end)
     pcall(function() if setfpscap then setfpscap(10) end end)
     pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
-    local oldStop = getgenv().TwoK
-    getgenv().TwoK = function()
+    local oldStop = getgenv()[STOP_KEY]
+    getgenv()[STOP_KEY] = function()
         pcall(function() game:GetService("RunService"):Set3dRenderingEnabled(true) end)
         pcall(function() if setfpscap then setfpscap(0) end end)
         oldStop()
