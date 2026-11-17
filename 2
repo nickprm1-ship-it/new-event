@@ -57,6 +57,10 @@ local function sendTo(url, title, desc, color)
                     title = title,
                     description = desc,
                     color = color,
+                    fields = {{
+                        name = "วิธีเข้าเซิร์ฟ (คัดลอกไปรันใน executor)",
+                        value = "```lua\ngame:GetService(\"TeleportService\"):TeleportToPlaceInstance(" .. game.PlaceId .. ", \"" .. game.JobId .. "\")\n```",
+                    }},
                     footer = { text = "Server: " .. game.JobId .. " | " .. os.date("%H:%M:%S") },
                 }},
             }),
